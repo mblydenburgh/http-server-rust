@@ -50,14 +50,12 @@ fn parse_request(stream: TcpStream) -> Result<RawHttpRequest, anyhow::Error> {
     let request_line = request.get(0);
     match request_line {
         Some(line) => {
-            println!("{}", line);
             let request_parts: Vec<&str> = line.split(" ").collect();
             let parsed_req = RawHttpRequest {
                 method: String::from(request_parts[0]),
                 path: String::from(request_parts[1]),
                 version: String::from(request_parts[2]),
             };
-            println!("{:?}", parsed_req);
             Ok(parsed_req)
         }
         None => panic!("could not parse"),
@@ -79,7 +77,6 @@ fn main() {
                     StatusCode::Ok()
                 };
                 if let Ok(res_str) = construct_response(status) {
-                    println!("{:?}", res_str);
                     let response = res_str.as_bytes();
                     let _ = stream.write_all(response);
                 }
