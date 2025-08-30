@@ -46,7 +46,7 @@ fn construct_response(
     headers: Option<Vec<(String, String)>>,
     body: Option<String>,
 ) -> Result<String, anyhow::Error> {
-    let status = String::from(format!("HTTP/1.1 {}\r\n", code.as_string()));
+    let status = String::from(format!("HTTP/1.1 {}", code.as_string()));
     let headers_str = match headers {
         Some(headers) => &construct_headers(headers),
         None => "\r\n",
@@ -55,7 +55,7 @@ fn construct_response(
         Some(b) => String::from(b),
         None => String::from(""),
     };
-    Ok(status + &headers_str + &body)
+    Ok(status + "\r\n" + &headers_str + "\r\n" + &body)
 }
 
 fn parse_request(stream: TcpStream) -> Result<RawHttpRequest, anyhow::Error> {
