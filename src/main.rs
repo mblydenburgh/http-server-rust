@@ -103,6 +103,7 @@ fn main() {
                         ]),
                         Some(path_parts[1].into()),
                     ),
+                    "" => construct_response(StatusCode::Ok(), None, None),
                     _ => construct_response(StatusCode::NotFound(), None, None),
                 };
                 println!("build response: {:?}", response);
