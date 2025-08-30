@@ -33,11 +33,29 @@ struct RawHttpRequest {
     version: String,
 }
 
-fn construct_response(code: StatusCode) -> Result<String, anyhow::Error> {
+fn construct_headers(headers: Vec<(String, String)>) -> String {
+    let res_headers: Vec<String> = headers
+        .iter()
+        .map(|h| format!("{}: {}", h.0, h.1))
+        .collect();
+    res_headers.join("\r\n") + "\r\n"
+}
+
+fn construct_response(
+    code: StatusCode,
+    headers: Option<Vec<(String, String)>>,
+    body: Option<String>,
+) -> Result<String, anyhow::Error> {
     let status = String::from(format!("HTTP/1.1 {}\r\n", code.as_string()));
-    let headers = String::from("\r\n");
-    let body = String::from("");
-    Ok(status + &headers + &body)
+    let headers_str = match headers {
+        Some(headers) => &construct_headers(headers),
+        None => "\r\n",
+    };
+    let body = match body {
+        Some(b) => String::from(b),
+        None => String::from(""),
+    };
+    Ok(status + &headers_str + &body)
 }
 
 fn parse_request(stream: TcpStream) -> Result<RawHttpRequest, anyhow::Error> {
@@ -69,14 +87,26 @@ fn main() {
         match stream {
             Ok(mut stream) => {
                 let request = parse_request(stream.try_clone().unwrap()).unwrap();
+                println!("{:?}", request);
                 let _ = request.method;
                 let _ = request.version;
-                let status = if request.path != "/" {
-                    StatusCode::NotFound()
-                } else {
-                    StatusCode::Ok()
+                let mut path_parts: Vec<&str> = request.path.split("/").collect();
+                path_parts.remove(0);
+                let root = path_parts[0];
+                println!("root: {}", root);
+                let response = match root {
+                    "echo" => construct_response(
+                        StatusCode::Ok(),
+                        Some(vec![
+                            ("Content-Type".into(), "text/plain".into()),
+                            ("Content-Length".into(), path_parts[1].len().to_string()),
+                        ]),
+                        Some(path_parts[1].into()),
+                    ),
+                    _ => construct_response(StatusCode::NotFound(), None, None),
                 };
-                if let Ok(res_str) = construct_response(status) {
+                println!("build response: {:?}", response);
+                if let Ok(res_str) = response {
                     let response = res_str.as_bytes();
                     let _ = stream.write_all(response);
                 }
