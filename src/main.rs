@@ -89,9 +89,7 @@ fn parse_request(stream: &TcpStream) -> Result<RawHttpRequest, anyhow::Error> {
     loop {
         let mut line = String::new();
         reader.read_line(&mut line)?;
-        println!("processing line: {:?}", line);
         if line.starts_with("\r\n") {
-            println!("empty line, breaking loop");
             break;
         }
         let header_parts: Vec<&str> = line.split_whitespace().collect();
@@ -100,7 +98,6 @@ fn parse_request(stream: &TcpStream) -> Result<RawHttpRequest, anyhow::Error> {
             value: header_parts[1].into(),
         });
     }
-    println!("headers {:?}", headers);
 
     Ok(RawHttpRequest {
         method: String::from(request_line_parts[0]),
@@ -116,61 +113,66 @@ fn main() {
 
     for stream in listener.incoming() {
         match stream {
-            Ok(mut stream) => {
-                let request = parse_request(&stream.try_clone().unwrap()).unwrap();
-                println!("{:?}", request);
-                let _ = request.method;
-                let _ = request.version;
-                let mut path_parts: Vec<&str> = request.path.split("/").collect();
-                path_parts.remove(0);
-                let root = path_parts[0];
-                println!("handling request for: /{}", root);
-                let response = match root {
-                    "echo" => construct_response(
-                        StatusCode::Ok(),
-                        Some(vec![
-                            ("Content-Type".into(), "text/plain".into()),
-                            ("Content-Length".into(), path_parts[1].len().to_string()),
-                        ]),
-                        Some(path_parts[1].into()),
-                    ),
-                    "user-agent" => {
-                        let user_agent: Option<&Header> = request
-                            .headers
-                            .iter()
-                            .clone()
-                            .find(|h| h.key == "User-Agent");
-                        let content_length = user_agent.unwrap().value.clone().len().to_string();
-                        let body = user_agent.unwrap().value.clone().to_string();
-                        construct_response(
-                            StatusCode::Ok(),
-                            Some(vec![
-                                ("Content-Type".into(), "text/plain".into()),
-                                (
-                                    "Content-Length".into(),
-                                    user_agent.unwrap().value.clone().len().to_string(),
-                                ),
-                            ]),
-                            Some(user_agent.unwrap().value.clone().to_string()),
-                        )
-                    }
-                    "" => construct_response(StatusCode::Ok(), None, None),
-                    _ => construct_response(StatusCode::NotFound(), None, None),
-                };
-                if let Ok(res_str) = response {
-                    let response = res_str.as_bytes();
-                    let result = stream.write_all(response);
-                    let _ = stream.flush();
-                    if let Err(e) = result {
-                        panic!("ahhh! {:?}?", e);
-                    }
-                } else {
-                    println!("could not build response");
-                }
+            Ok(stream) => {
+                std::thread::spawn(move || {
+                    handle_request(stream);
+                });
             }
             Err(e) => {
-                println!("error: {}", e);
+                println!("Error reading TCPStream: {}", e);
             }
         }
+    }
+}
+
+fn handle_request(mut stream: TcpStream) {
+    let request = parse_request(&stream).unwrap();
+    println!("{:?}", request);
+
+    let _ = request.method;
+    let _ = request.version;
+    let mut path_parts: Vec<&str> = request.path.split("/").collect();
+    path_parts.remove(0);
+    let root = path_parts[0];
+    println!("handling request for: /{}", root);
+    let response = match root {
+        "echo" => construct_response(
+            StatusCode::Ok(),
+            Some(vec![
+                ("Content-Type".into(), "text/plain".into()),
+                ("Content-Length".into(), path_parts[1].len().to_string()),
+            ]),
+            Some(path_parts[1].into()),
+        ),
+        "user-agent" => {
+            let user_agent: Option<&Header> = request
+                .headers
+                .iter()
+                .clone()
+                .find(|h| h.key == "User-Agent");
+            let content_length = user_agent.unwrap().value.clone().len().to_string();
+            let body = user_agent.unwrap().value.clone().to_string();
+            construct_response(
+                StatusCode::Ok(),
+                Some(vec![
+                    ("Content-Type".into(), "text/plain".into()),
+                    ("Content-Length".into(), content_length),
+                ]),
+                Some(body),
+            )
+        }
+        "" => construct_response(StatusCode::Ok(), None, None),
+        _ => construct_response(StatusCode::NotFound(), None, None),
+    };
+
+    if let Ok(res_str) = response {
+        let response = res_str.as_bytes();
+        let result = stream.write_all(response);
+        let _ = stream.flush();
+        if let Err(e) = result {
+            panic!("ahhh! {:?}?", e);
+        }
+    } else {
+        println!("could not build response");
     }
 }
