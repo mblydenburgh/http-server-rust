@@ -1,7 +1,8 @@
 #[allow(unused_imports)]
 use std::net::TcpListener;
 use std::{
-    io::{BufRead, BufReader, Write},
+    fs,
+    io::{BufRead, BufReader, Read, Write},
     net::TcpStream,
 };
 
@@ -42,6 +43,7 @@ impl FromIterator<(String, String)> for Header {
 struct RawHttpRequest {
     method: String,
     path: String,
+    path_parts: Vec<String>,
     version: String,
     headers: Vec<Header>,
     body: String,
@@ -79,7 +81,11 @@ fn parse_request(stream: &TcpStream) -> Result<RawHttpRequest, anyhow::Error> {
     let mut reader = BufReader::new(stream);
     let mut request_line = String::new();
     reader.read_line(&mut request_line)?;
-    let request_line_parts: Vec<&str> = request_line.split_whitespace().collect();
+    let request_line_parts: Vec<String> = request_line
+        .clone()
+        .split_whitespace()
+        .map(|s| s.to_string())
+        .collect();
     if request_line_parts.len() < 3 {
         return Err(anyhow::anyhow!("Invalid request line"));
     }
@@ -99,10 +105,17 @@ fn parse_request(stream: &TcpStream) -> Result<RawHttpRequest, anyhow::Error> {
         });
     }
 
+    let mut path_parts: Vec<String> = request_line_parts[1]
+        .clone()
+        .split("/")
+        .map(|s| s.to_string())
+        .collect();
+    path_parts.remove(0); // first part is "/"
     Ok(RawHttpRequest {
-        method: String::from(request_line_parts[0]),
-        path: String::from(request_line_parts[1]),
-        version: String::from(request_line_parts[2]),
+        method: String::from(&request_line_parts[0]),
+        path: String::from(&request_line_parts[1]),
+        path_parts,
+        version: String::from(&request_line_parts[2]),
         headers,
         body: String::new(),
     })
@@ -131,36 +144,13 @@ fn handle_request(mut stream: TcpStream) {
 
     let _ = request.method;
     let _ = request.version;
-    let mut path_parts: Vec<&str> = request.path.split("/").collect();
-    path_parts.remove(0);
-    let root = path_parts[0];
+
+    let root = request.path_parts[0].clone();
     println!("handling request for: /{}", root);
-    let response = match root {
-        "echo" => construct_response(
-            StatusCode::Ok(),
-            Some(vec![
-                ("Content-Type".into(), "text/plain".into()),
-                ("Content-Length".into(), path_parts[1].len().to_string()),
-            ]),
-            Some(path_parts[1].into()),
-        ),
-        "user-agent" => {
-            let user_agent: Option<&Header> = request
-                .headers
-                .iter()
-                .clone()
-                .find(|h| h.key == "User-Agent");
-            let content_length = user_agent.unwrap().value.clone().len().to_string();
-            let body = user_agent.unwrap().value.clone().to_string();
-            construct_response(
-                StatusCode::Ok(),
-                Some(vec![
-                    ("Content-Type".into(), "text/plain".into()),
-                    ("Content-Length".into(), content_length),
-                ]),
-                Some(body),
-            )
-        }
+    let response = match root.as_str() {
+        "echo" => echo(request),
+        "user-agent" => user_agent(request),
+        "files" => file(request),
         "" => construct_response(StatusCode::Ok(), None, None),
         _ => construct_response(StatusCode::NotFound(), None, None),
     };
@@ -174,5 +164,61 @@ fn handle_request(mut stream: TcpStream) {
         }
     } else {
         println!("could not build response");
+    }
+}
+
+fn echo(request: RawHttpRequest) -> Result<String, anyhow::Error> {
+    construct_response(
+        StatusCode::Ok(),
+        Some(vec![
+            ("Content-Type".into(), "text/plain".into()),
+            (
+                "Content-Length".into(),
+                request.path_parts[1].len().to_string(),
+            ),
+        ]),
+        Some(request.path_parts[1].clone().into()),
+    )
+}
+
+fn user_agent(request: RawHttpRequest) -> Result<String, anyhow::Error> {
+    let user_agent: Option<&Header> = request
+        .headers
+        .iter()
+        .clone()
+        .find(|h| h.key == "User-Agent");
+    let content_length = user_agent.unwrap().value.clone().len().to_string();
+    let body = user_agent.unwrap().value.clone().to_string();
+    construct_response(
+        StatusCode::Ok(),
+        Some(vec![
+            ("Content-Type".into(), "text/plain".into()),
+            ("Content-Length".into(), content_length),
+        ]),
+        Some(body),
+    )
+}
+
+fn file(request: RawHttpRequest) -> Result<String, anyhow::Error> {
+    let file_name = format!("{}", request.path_parts[1].clone());
+    let argv = std::env::args().collect::<Vec<String>>();
+    let dir = argv[2].clone();
+    if let Ok(mut file) = fs::File::open(format!("{dir}{file_name}")) {
+        println!("found");
+        let mut body = String::new();
+        file.read_to_string(&mut body).unwrap();
+        let content_length = body.len().to_string();
+        println!("body: {}", body);
+        construct_response(
+            StatusCode::Ok(),
+            Some(vec![
+                ("Content-Type".into(), "application/octet-stream".into()),
+                ("Content-Length".into(), content_length),
+            ]),
+            Some(body),
+        )
+    } else {
+        println!("not found");
+        construct_response(StatusCode::NotFound(), None, None)
     }
 }
