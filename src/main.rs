@@ -204,15 +204,32 @@ fn handle_request(mut stream: TcpStream) {
 }
 
 fn echo(request: RawHttpRequest) -> Result<String, anyhow::Error> {
-    construct_response(
-        StatusCode::Ok(),
-        Some(vec![
+    let encoding_header = request.headers.iter().find(|h| h.key == "Accept-Encoding");
+    let headers = match encoding_header {
+        Some(h) => {
+            let mut default = vec![
+                ("Content-Type".into(), "text/plain".into()),
+                (
+                    "Content-Length".into(),
+                    request.path_parts[1].len().to_string(),
+                ),
+            ];
+            if h.value == "gzip" {
+                default.push(("Content-Encoding".into(), "gzip".into()));
+            }
+            default
+        }
+        None => vec![
             ("Content-Type".into(), "text/plain".into()),
             (
                 "Content-Length".into(),
                 request.path_parts[1].len().to_string(),
             ),
-        ]),
+        ],
+    };
+    construct_response(
+        StatusCode::Ok(),
+        Some(headers),
         Some(request.path_parts[1].clone().into()),
     )
 }
