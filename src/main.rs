@@ -110,9 +110,14 @@ fn parse_request(mut stream: &TcpStream) -> Result<RawHttpRequest, anyhow::Error
         }
         let header_parts: Vec<&str> = line.split_whitespace().collect();
         println!("header parts: {:?}", header_parts);
+        let value = if header_parts.iter().len() > 2 {
+            header_parts[1..].join(", ").into()
+        } else {
+            header_parts[1].into()
+        };
         headers.push(Header {
             key: header_parts[0].replace(":", "").into(),
-            value: header_parts[1].into(),
+            value,
         });
         if header_parts[0].eq_ignore_ascii_case("content-length") {
             content_length = header_parts[1].parse().unwrap_or(0);
@@ -214,9 +219,12 @@ fn echo(request: RawHttpRequest) -> Result<String, anyhow::Error> {
                     request.path_parts[1].len().to_string(),
                 ),
             ];
-            if h.value == "gzip" {
-                default.push(("Content-Encoding".into(), "gzip".into()));
-            }
+            let encodings: Vec<String> = h.value.split(",").map(|v| v.trim().into()).collect();
+            encodings.iter().for_each(|h| {
+                if h == "gzip" {
+                    default.push(("Content-Encoding".into(), "gzip".into()));
+                }
+            });
             default
         }
         None => vec![
