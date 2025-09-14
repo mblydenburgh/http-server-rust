@@ -4,8 +4,9 @@ use std::{
     fs,
     io::{Read, Write},
     net::TcpStream,
-    path::PathBuf,
 };
+
+use flate2::{write::GzEncoder, Compression};
 
 #[derive(Debug)]
 enum StatusCode {
@@ -70,18 +71,25 @@ fn construct_headers(headers: Vec<(String, String)>) -> String {
 fn construct_response(
     code: StatusCode,
     headers: Option<Vec<(String, String)>>,
-    body: Option<String>,
-) -> Result<String, anyhow::Error> {
+    body: Option<Vec<u8>>,
+) -> Result<Vec<u8>, anyhow::Error> {
     let status = String::from(format!("HTTP/1.1 {}", code.as_string()));
     let headers_str = match headers {
         Some(headers) => &construct_headers(headers),
         None => "\r\n",
     };
     let body = match body {
-        Some(b) => String::from(b),
-        None => String::from(""),
+        Some(b) => b,
+
+        None => vec![],
     };
-    Ok(status + "\r\n" + &headers_str + "\r\n" + &body)
+    let mut response = Vec::new();
+    response.extend(status.as_bytes());
+    response.extend(b"\r\n");
+    response.extend(headers_str.as_bytes());
+    response.extend(b"\r\n");
+    response.extend(body);
+    Ok(response)
 }
 
 fn parse_request(mut stream: &TcpStream) -> Result<RawHttpRequest, anyhow::Error> {
@@ -109,15 +117,14 @@ fn parse_request(mut stream: &TcpStream) -> Result<RawHttpRequest, anyhow::Error
             break;
         }
         let header_parts: Vec<&str> = line.split_whitespace().collect();
-        println!("header parts: {:?}", header_parts);
-        let value = if header_parts.iter().len() > 2 {
+        let value: String = if header_parts.iter().len() > 2 {
             header_parts[1..].join(", ").into()
         } else {
             header_parts[1].into()
         };
         headers.push(Header {
             key: header_parts[0].replace(":", "").into(),
-            value,
+            value: String::from(&value),
         });
         if header_parts[0].eq_ignore_ascii_case("content-length") {
             content_length = header_parts[1].parse().unwrap_or(0);
@@ -125,13 +132,11 @@ fn parse_request(mut stream: &TcpStream) -> Result<RawHttpRequest, anyhow::Error
     }
 
     let body_start_index = req_str.find("\r\n\r\n").unwrap_or(0) + 4;
-    println!("body start: {}", body_start_index);
     let body = if body_start_index > request_line.len() {
         req_str[body_start_index..].to_string()
     } else {
         String::new()
     };
-    println!("parsed body: {}", body);
 
     let body = if content_length > 0 && body.len() > content_length {
         body[..content_length].to_string()
@@ -193,24 +198,27 @@ fn handle_request(mut stream: TcpStream) {
         _ => construct_response(StatusCode::NotFound(), None, None),
     };
 
-    if let Ok(res_str) = response {
-        let response = res_str.as_bytes();
-        let result = stream.write_all(response);
+    if let Ok(res) = response {
+        let result = stream.write_all(&res);
         if let Err(e) = result {
-            let err = construct_response(StatusCode::ServerError(), None, Some(e.to_string()));
-            let _ = stream.write_all(err.unwrap().as_bytes());
+            let err = construct_response(
+                StatusCode::ServerError(),
+                None,
+                Some(e.to_string().as_bytes().to_vec()),
+            );
+            let _ = stream.write_all(&err.unwrap());
         }
     } else {
         let err = construct_response(StatusCode::ServerError(), None, None);
-        let _ = stream.write_all(err.unwrap().as_bytes());
+        let _ = stream.write_all(&err.unwrap());
     }
     let _ = stream.flush();
     let _ = stream.shutdown(std::net::Shutdown::Both);
 }
 
-fn echo(request: RawHttpRequest) -> Result<String, anyhow::Error> {
+fn echo(request: RawHttpRequest) -> Result<Vec<u8>, anyhow::Error> {
     let encoding_header = request.headers.iter().find(|h| h.key == "Accept-Encoding");
-    let headers = match encoding_header {
+    let mut headers = match encoding_header {
         Some(h) => {
             let mut default = vec![
                 ("Content-Type".into(), "text/plain".into()),
@@ -219,8 +227,10 @@ fn echo(request: RawHttpRequest) -> Result<String, anyhow::Error> {
                     request.path_parts[1].len().to_string(),
                 ),
             ];
+            // client could accept multiple encoding types
             let encodings: Vec<String> = h.value.split(",").map(|v| v.trim().into()).collect();
             encodings.iter().for_each(|h| {
+                // server only supports gzip
                 if h == "gzip" {
                     default.push(("Content-Encoding".into(), "gzip".into()));
                 }
@@ -235,14 +245,24 @@ fn echo(request: RawHttpRequest) -> Result<String, anyhow::Error> {
             ),
         ],
     };
-    construct_response(
-        StatusCode::Ok(),
-        Some(headers),
-        Some(request.path_parts[1].clone().into()),
-    )
+    let req_body = request.path_parts[1].clone();
+    match headers.clone().iter().find(|h| h.1 == "gzip") {
+        Some(_) => {
+            let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
+            encoder.write_all(req_body.as_bytes())?;
+            let encoded = encoder.finish().unwrap();
+            headers[1].1 = encoded.len().to_string();
+            construct_response(StatusCode::Ok(), Some(headers), Some(encoded))
+        }
+        None => construct_response(
+            StatusCode::Ok(),
+            Some(headers),
+            Some(req_body.as_bytes().to_vec()),
+        ),
+    }
 }
 
-fn user_agent(request: RawHttpRequest) -> Result<String, anyhow::Error> {
+fn user_agent(request: RawHttpRequest) -> Result<Vec<u8>, anyhow::Error> {
     let user_agent: Option<&Header> = request
         .headers
         .iter()
@@ -256,11 +276,11 @@ fn user_agent(request: RawHttpRequest) -> Result<String, anyhow::Error> {
             ("Content-Type".into(), "text/plain".into()),
             ("Content-Length".into(), content_length),
         ]),
-        Some(body),
+        Some(body.as_bytes().to_vec()),
     )
 }
 
-fn get_file(request: RawHttpRequest) -> Result<String, anyhow::Error> {
+fn get_file(request: RawHttpRequest) -> Result<Vec<u8>, anyhow::Error> {
     let file_name = format!("{}", request.path_parts[1].clone());
     // get directory from ./your_program.sh --directory /tmp/
     let argv = std::env::args().collect::<Vec<String>>();
@@ -275,14 +295,14 @@ fn get_file(request: RawHttpRequest) -> Result<String, anyhow::Error> {
                 ("Content-Type".into(), "application/octet-stream".into()),
                 ("Content-Length".into(), content_length),
             ]),
-            Some(body),
+            Some(body.as_bytes().to_vec()),
         )
     } else {
         construct_response(StatusCode::NotFound(), None, None)
     }
 }
 
-fn post_file(request: RawHttpRequest) -> Result<String, anyhow::Error> {
+fn post_file(request: RawHttpRequest) -> Result<Vec<u8>, anyhow::Error> {
     println!("posting file {}", request.path_parts[1].clone());
     println!("body contents: {}", request.body);
     let file_name = format!("{}", request.path_parts[1].clone());
@@ -291,16 +311,6 @@ fn post_file(request: RawHttpRequest) -> Result<String, anyhow::Error> {
     let dir = argv[2].clone(); // /tmp/some/dir/
 
     let name = format!("{dir}{file_name}");
-
-    let body_length = request
-        .headers
-        .iter()
-        .find(|h| h.key == "Content-Length")
-        .expect("No Content-Length header")
-        .value
-        .clone()
-        .parse::<usize>()
-        .unwrap();
 
     match fs::write(name, &request.body.as_bytes()) {
         Ok(_) => {
